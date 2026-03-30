@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <title>TMR Feeder Manager</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{margin:0;padding:0;background:#faf5e8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+    input,select,button{font-family:inherit;}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+// ─── Palette ────────────────────────────────────────────────
+const G = {
+  dg:"#162e0a", mg:"#254d14", lg:"#3a6b1e",
+  gold:"#b8892a", goldL:"#d4a53c",
+  cream:"#f0e8cf", lc:"#faf5e8",
+  w:"#ffffff", red:"#b03a2e", amber:"#ca6f1e",
+  grey:"#6b7280", lgrey:"#e5e7eb", ok:"#27ae60",
+};
+const serif = "Georgia,'Times New Roman',serif";
+const sans  = "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+
+// ─── Helpers ────────────────────────────────────────────────
+const uid   = () => Math.random().toString(36).slice(2,9);
+const today = () => new Date().toISOString().slice(0,10);
+const n2    = v  => isFinite(+v) ? Math.round(+v*10)/10 : 0;
+const isAD  = s  => typeof s==="string" && s.includes("AD");
+const lsGet = (k,d) => { try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch{return d;} };
+const lsSet = (k,v) => { try{ localStorage.setItem(k,JSON.stringify(v)); }catch{} };
+
+// ─── Shared atoms ───────────────────────────────────────────
+const Card = ({children, style={}}) => (
+  <div style={{background:G.w,borderRadius:14,padding:16,marginBottom:12,
+    boxShadow:"0 2px 10px rgba(0,0,0,.07)",...style}}>{children}</div>
+);
+const STitle = ({children}) => (
+  <div style={{fontFamily:serif,fontSize:15,fontWeight:"bold",color:G.dg,
+    borderBottom:`2px solid ${G.gold}`,paddingBottom:6,marginBottom:14}}>{children}</div>
+);
+const Btn = ({children,onClick,bg=G.dg,fg=G.cream,sm=false,disabled=false,style={}}) => (
+  <button onClick={disabled?undefined:onClick} style={{
+    background:disabled?G.grey:bg,color:disabled?G.w:fg,
+    border:"none",borderRadius:12,padding:sm?"9px 15px":"14px 20px",
+    fontSize:sm?13:15,fontWeight:"bold",cursor:disabled?"default":"pointer",
+    width:"100%",marginBottom:8,touchAction:"manipulation",...style}}>
+    {children}
+  </button>
+);
+const Banner = ({msg,type="warn",onClose}) => {
+  if(!msg) return null;
+  const bg={warn:G.amber,err:G.red,ok:G.ok,info:G.mg}[type]??G.amber;
+  return (
+    <div style={{background:bg,color:G.w,padding:"10px 16px",marginBottom:10,
+      display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:13,borderRadius:8}}>
+      <span style={{flex:1}}>{msg}</span>
+      {onClose&&<button onClick={onClose} style={{background:"none",border:"none",
+        color:G.w,fontSize:22,cursor:"pointer",padding:"0 0 0 12px",lineHeight:1}}>x</button>}
+    </div>
+  );
+};
+
+// ─── NumPad ─────────────────────────────────────────────────
+function NumPad({label,unit="kg",init="",decimal=true,onConfirm,onCancel}) {
+  const [val,setVal] = useState(String(init??""));
+  const press = k => {
+    if(k==="back"){ setVal(v=>v.slice(0,-1)); return; }
+    if(k==="C")   { setVal(""); return; }
+    if(k==="."&&(!decimal||val.includes("."))) return;
+    if(val==="0"&&k!==".") { setVal(k); return; }
+    if(val.length>=8) return;
+    setVal(v=>v+k);
+  };
+  const confirm = () => { const n=parseFloat(val); onConfirm(isNaN(n)?0:n); };
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.65)",
+      zIndex:9000,display:"flex",alignItems:"flex-end"}} onClick={onCancel}>
+      <div style={{width:"100%",background:G.lc,borderRadius:"20px 20px 0 0",
+        padding:16,boxShadow:"0 -4px 24px rgba(0,0,0,.3)"}} onClick={e=>e.stopPropagation()}>
+        <p style={{margin:"0 0 8px",textAlign:"center",fontFamily:serif,
+          color:G.dg,fontWeight:"bold",fontSize:15}}>{label}</p>
+        <div style={{background:G.w,border:`2px solid ${G.gold}`,borderRadius:12,
+          padding:"10px 16px",marginBottom:12,textAlign:"right",fontSize:30,
+          fontWeight:"bold",color:G.dg,minHeight:54,
+          display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6}}>
+          <span>{val||"0"}</span>
+          {unit&&<span style={{fontSize:14,color:G.grey}}>{unit}</span>}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+          {["7","8","9","4","5","6","1","2","3","C","0","."].map(k=>(
+            <button key={k} onClick={()=>press(k)} style={{
+              padding:"18px 0",fontSize:20,fontWeight:"bold",borderRadius:12,border:"none",
+              background:k==="C"?G.red:G.dg,color:G.cream,
+              cursor:"pointer",touchAction:"manipulation"}}>{k}</button>
+          ))}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginTop:8}}>
+          <button onClick={()=>press("back")} style={{padding:16,background:G.amber,
+            color:G.w,border:"none",borderRadius:12,fontSize:18,cursor:"pointer"}}>{"<"}</button>
+          <button onClick={onCancel} style={{padding:16,background:G.grey,
+            color:G.w,border:"none",borderRadius:12,fontSize:15,cursor:"pointer"}}>Cancel</button>
+          <button onClick={confirm} style={{padding:16,background:G.gold,
+            color:G.dg,border:"none",borderRadius:12,fontSize:15,fontWeight:"bold",cursor:"pointer"}}>OK</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function useNumpad() {
+  const [np,setNp] = useState(null);
+  const open = (label,unit,init,decimal,cb) =>
+    setNp({label,unit,init,decimal,onConfirm:(n)=>{cb(n);setNp(null);}});
+  const el = np ? <NumPad {...np} onCancel={()=>setNp(null)}/> : null;
+  return [el, open];
+}
+
+const NumField = ({value,unit="kg",placeholder="Tap to enter",onClick,style={}}) => {
+  const has = value!==""&&value!==null&&value!==undefined;
+  return (
+    <div onClick={onClick} style={{background:G.w,border:`2px solid ${has?G.gold:G.lgrey}`,
+      borderRadius:10,padding:"12px 16px",display:"flex",justifyContent:"space-between",
+      alignItems:"center",cursor:"pointer",minHeight:50,touchAction:"manipulation",...style}}>
+      <span style={{fontSize:19,fontWeight:"bold",color:has?G.dg:G.grey}}>
+        {has?value:placeholder}
+      </span>
+      {unit&&<span style={{color:G.grey,fontSize:13}}>{unit}</span>}
+    </div>
+  );
+};
+
+// ─── Header ─────────────────────────────────────────────────
+function Header({title,onHome,isOnline,pending=0}) {
+  return (
+    <div style={{background:`linear-gradient(135deg,${G.dg} 0%,${G.mg} 100%)`,
+      padding:"14px 16px 10px",color:G.cream,position:"sticky",top:0,zIndex:100}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+        <button onClick={onHome} style={{background:G.gold,border:"none",borderRadius:8,
+          padding:"7px 13px",color:G.dg,fontWeight:"bold",fontSize:13,
+          cursor:"pointer",touchAction:"manipulation"}}>Home</button>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <span style={{background:isOnline?G.ok:G.red,color:G.w,borderRadius:12,
+            padding:"3px 10px",fontSize:11,fontWeight:"bold"}}>
+            {isOnline?"Online":"Offline"}
+          </span>
+          {pending>0&&(
+            <span style={{background:G.amber,color:G.w,borderRadius:12,
+              padding:"3px 10px",fontSize:11,fontWeight:"bold"}}>{pending} pending</span>
+          )}
+        </div>
+      </div>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontFamily:serif,fontSize:18,fontWeight:"bold",
+          color:G.cream,letterSpacing:.5}}>{title}</div>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// HOME
+// ════════════════════════════════════════════════════════════
+function HomeScreen({farms,groups,records,pending,settings,isOnline,go,onFarmChange}) {
+  const farm       = farms.find(f=>f.id===settings.currentFarmId);
+  const farmGroups = groups.filter(g=>g.farmId===settings.currentFarmId);
+  const allRecs    = [...records,...pending];
+  const todayRecs  = allRecs.filter(r=>r.farmId===settings.currentFarmId&&r.date===today());
+  return (
+    <div style={{padding:16}}>
+      <Card style={{background:`linear-gradient(135deg,${G.cream},${G.lc})`,border:`1px solid ${G.gold}`}}>
+        <STitle>Active Farm</STitle>
+        {farms.length===0?(
+          <p style={{color:G.grey,fontSize:13}}>No farms set up. Go to Settings to add your first farm.</p>
+        ):(
+          <select value={settings.currentFarmId} onChange={e=>onFarmChange(e.target.value)}
+            style={{width:"100%",padding:12,borderRadius:10,border:`2px solid ${G.gold}`,
+              fontSize:15,background:G.w,color:G.dg,fontWeight:"bold"}}>
+            <option value="">Select Farm</option>
+            {farms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+          </select>
+        )}
+      </Card>
+      {farm&&(
+        <>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+            {[
+              {icon:"🐄",label:"Groups",       val:farmGroups.length},
+              {icon:"📋",label:"Fed Today",    val:todayRecs.length},
+              {icon:"⏳",label:"Pending Sync", val:pending.length},
+              {icon:"📊",label:"All Records",  val:allRecs.filter(r=>r.farmId===settings.currentFarmId).length},
+            ].map(s=>(
+              <Card key={s.label} style={{textAlign:"center",marginBottom:0,padding:12}}>
+                <div style={{fontSize:26}}>{s.icon}</div>
+                <div style={{fontSize:24,fontWeight:"bold",color:G.dg,lineHeight:1}}>{s.val}</div>
+                <div style={{fontSize:11,color:G.grey,marginTop:2}}>{s.label}</div>
+              </Card>
+            ))}
+          </div>
+          <Card>
+            <STitle>Quick Actions</STitle>
+            <Btn onClick={()=>go("process")} bg={G.gold} fg={G.dg}>🚜 Start Feeding Session</Btn>
+            <Btn onClick={()=>go("setup")}>⚙️ Mix Setup / Groups</Btn>
+            <Btn onClick={()=>go("records")}>📋 Feed Records and Export</Btn>
+            <Btn onClick={()=>go("settings")}>🔧 Settings and Farms</Btn>
+            <Btn onClick={()=>go("help")} bg={G.mg}>📱 How to Share App</Btn>
+          </Card>
+          {todayRecs.length>0&&(
+            <Card>
+              <STitle>Today's Sessions</STitle>
+              {todayRecs.map(r=>(
+                <div key={r.id} style={{display:"flex",justifyContent:"space-between",
+                  padding:"8px 0",borderBottom:`1px solid ${G.lgrey}`,fontSize:14}}>
+                  <div>
+                    <div style={{fontWeight:"bold",color:G.dg}}>{r.groupName}</div>
+                    <div style={{fontSize:12,color:G.grey}}>{r.heads} head</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontWeight:"bold",color:G.gold}}>{r.totalKg} kg</div>
+                    {pending.some(p=>p.id===r.id)&&
+                      <div style={{fontSize:10,color:G.amber}}>pending sync</div>}
+                  </div>
+                </div>
+              ))}
+            </Card>
+          )}
+        </>
+      )}
+      {farms.length===0&&(
+        <Btn onClick={()=>go("settings")} bg={G.gold} fg={G.dg}>+ Set Up Your First Farm</Btn>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// SETUP — list groups
+// ════════════════════════════════════════════════════════════
+function SetupScreen({farms,groups,settings,go,onDeleteGroup}) {
+  const farm       = farms.find(f=>f.id===settings.currentFarmId);
+  const farmGroups = groups.filter(g=>g.farmId===settings.currentFarmId);
+  if(!farm) return (
+    <div style={{padding:16}}>
+      <Banner msg="Please select a farm first." type="warn"/>
+      <Btn onClick={()=>go("settings")} bg={G.gold} fg={G.dg}>Go to Settings</Btn>
+    </div>
+  );
+  return (
+    <div style={{padding:16}}>
+      <Card>
+        <STitle>Mix Groups — {farm.name}</STitle>
+        <Btn onClick={()=>go("groupEditor",{group:null})} bg={G.gold} fg={G.dg}>+ Add New Group</Btn>
+      </Card>
+      {farmGroups.length===0&&(
+        <Card><p style={{color:G.grey,textAlign:"center"}}>No groups yet. Tap above to add one.</p></Card>
+      )}
+      {farmGroups.map(g=>{
+        const total  = g.ingredients.reduce((s,i)=>s+(+i.perHead||0)*(g.heads||0),0);
+        const overCap= total>(g.capacity||Infinity);
+        return (
+          <Card key={g.id} style={{borderLeft:`4px solid ${isAD(g.name)?G.gold:G.mg}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                  <span style={{fontFamily:serif,fontWeight:"bold",fontSize:16,color:G.dg}}>{g.name}</span>
+                  {isAD(g.name)&&(
+                    <span style={{background:G.gold,color:G.dg,borderRadius:8,
+                      padding:"1px 7px",fontSize:10,fontWeight:"bold"}}>AD</span>
+                  )}
+                </div>
+                <div style={{fontSize:12,color:G.grey}}>{g.heads} head — {g.ingredients.length} ingredients</div>
+                <div style={{fontSize:13,color:G.mg,marginTop:2}}>
+                  Load: {n2(total)} kg — Capacity: {g.capacity||"?"} kg
+                </div>
+                {overCap&&<div style={{fontSize:11,color:G.red,marginTop:2}}>Exceeds mixer capacity!</div>}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6,marginLeft:8}}>
+                <button onClick={()=>go("groupEditor",{group:g})}
+                  style={{background:G.mg,color:G.w,border:"none",borderRadius:8,
+                    padding:"7px 14px",cursor:"pointer",fontSize:13,fontWeight:"bold"}}>Edit</button>
+                <button onClick={()=>{if(window.confirm("Delete "+g.name+"?")) onDeleteGroup(g.id);}}
+                  style={{background:G.red,color:G.w,border:"none",borderRadius:8,
+                    padding:"7px 14px",cursor:"pointer",fontSize:13,fontWeight:"bold"}}>Del</button>
+              </div>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:8}}>
+              {g.ingredients.map(i=>(
+                <span key={i.id} style={{background:G.lc,borderRadius:10,
+                  padding:"3px 9px",fontSize:11,color:G.dg}}>{i.name}: {i.perHead} kg/hd</span>
+              ))}
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// GROUP EDITOR
+// ════════════════════════════════════════════════════════════
+function GroupEditor({group,farmId,onSave,go}) {
+  const isNew = !group;
+  const [name,  setName]  = useState(group?.name??"");
+  const [heads, setHeads] = useState(group?.heads??"");
+  const [cap,   setCap]   = useState(group?.capacity??"");
+  const [ings,  setIngs]  = useState(group?.ingredients??[]);
+  const [msg,   setMsg]   = useState(null);
+  const [npEl,  openNp]  = useNumpad();
+
+  const addIng = () => setIngs(p=>[...p,{id:uid(),name:"",perHead:""}]);
+  const delIng = id => setIngs(p=>p.filter(i=>i.id!==id));
+  const updIng = (id,k,v) => setIngs(p=>p.map(i=>i.id===id?{...i,[k]:v}:i));
+
+  const totalLoad = ings.reduce((s,i)=>s+(parseFloat(i.perHead)||0)*(parseFloat(heads)||0),0);
+  const capVal    = parseFloat(cap)||0;
+  const overCap   = capVal>0&&totalLoad>capVal;
+
+  const save = () => {
+    if(!name.trim())                    {setMsg("Enter a group name."); return;}
+    if(!heads||+heads<=0)               {setMsg("Enter a valid number of head."); return;}
+    if(!cap||+cap<=0)                   {setMsg("Enter mixer capacity."); return;}
+    if(ings.length===0)                 {setMsg("Add at least one ingredient."); return;}
+    if(ings.some(i=>!i.name.trim()))    {setMsg("All ingredients need a name."); return;}
+    if(ings.some(i=>i.perHead===""||isNaN(i.perHead))){setMsg("All ingredients need a per-head amount."); return;}
+    onSave({
+      id:group?.id??uid(),farmId,
+      name:name.trim(),
+      heads:parseFloat(heads),
+      capacity:parseFloat(cap),
+      ingredients:ings.map(i=>({...i,perHead:parseFloat(i.perHead)})),
+    });
+  };
+
+  return (
+    <div style={{padding:16}}>
+      {npEl}
+      {msg&&<Banner msg={msg} type="err" onClose={()=>setMsg(null)}/>}
+      <Card>
+        <STitle>{isNew?"New Group / Mix":"Edit: "+group.name}</STitle>
+        <label style={{fontSize:13,color:G.grey}}>Group Name</label>
+        <input value={name} onChange={e=>setName(e.target.value)}
+          placeholder="e.g. Milking Cows, AD Group 1"
+          style={{width:"100%",padding:12,borderRadius:10,border:`2px solid ${G.gold}`,
+            fontSize:15,marginBottom:12,boxSizing:"border-box"}}/>
+        <label style={{fontSize:13,color:G.grey}}>Default Head Count</label>
+        <NumField value={heads} unit="head"
+          onClick={()=>openNp("Head count","head",heads,false,n=>setHeads(n))}/>
+        <div style={{height:12}}/>
+        <label style={{fontSize:13,color:G.grey}}>Mixer Capacity (kg)</label>
+        <NumField value={cap} unit="kg"
+          onClick={()=>openNp("Mixer capacity (kg)","kg",cap,true,n=>setCap(n))}/>
+      </Card>
+      <Card>
+        <STitle>Ingredients</STitle>
+        {ings.map((ing,idx)=>(
+          <div key={ing.id} style={{borderBottom:`1px solid ${G.lgrey}`,paddingBottom:14,marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontSize:13,color:G.dg,fontWeight:"bold"}}>Ingredient {idx+1}</span>
+              <button onClick={()=>delIng(ing.id)}
+                style={{background:G.red,color:G.w,border:"none",borderRadius:7,
+                  padding:"4px 11px",fontSize:12,cursor:"pointer"}}>Remove</button>
+            </div>
+            <label style={{fontSize:12,color:G.grey}}>Name</label>
+            <input value={ing.name} onChange={e=>updIng(ing.id,"name",e.target.value)}
+              placeholder="e.g. Grass Silage, Maize…"
+              style={{width:"100%",padding:10,borderRadius:8,border:`1px solid ${G.lgrey}`,
+                fontSize:14,marginBottom:8,boxSizing:"border-box"}}/>
+            <label style={{fontSize:12,color:G.grey}}>
+              kg per Head (no maximum per ingredient)
+            </label>
+            <NumField value={ing.perHead!==""?ing.perHead:""} unit="kg/head"
+              onClick={()=>openNp(
+                (ing.name||"Ingredient")+" — kg per head",
+                "kg",ing.perHead,true,
+                n=>updIng(ing.id,"perHead",n))}/>
+          </div>
+        ))}
+        <Btn onClick={addIng} bg={G.mg} sm>+ Add Ingredient</Btn>
+        {ings.length>0&&heads&&(
+          <div style={{marginTop:8,padding:12,borderRadius:10,
+            background:overCap?"#fde8e8":"#e8f5e9",
+            border:`1px solid ${overCap?G.red:"#81c784"}`}}>
+            <div style={{fontSize:13,color:overCap?G.red:G.dg}}>
+              Total per load: {n2(totalLoad)} kg
+              {overCap&&" — Exceeds "+cap+" kg capacity!"}
+            </div>
+          </div>
+        )}
+      </Card>
+      <Btn onClick={save} bg={G.gold} fg={G.dg}>{isNew?"Create Group":"Save Changes"}</Btn>
+      <Btn onClick={()=>go("setup")} bg={G.grey}>Back</Btn>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// PROCESS — feeding session
+// ════════════════════════════════════════════════════════════
+function ProcessScreen({farms,groups,settings,isOnline,onSave,go}) {
+  const farmGroups = groups.filter(g=>g.farmId===settings.currentFarmId);
+  const [phase,  setPhase]  = useState("select");
+  const [gid,    setGid]    = useState("");
+  const [heads,  setHeads]  = useState("");
+  const [startW, setStartW] = useState("");
+  const [co,     setCO]     = useState("");
+  const [step,   setStep]   = useState(0);
+  const [result, setResult] = useState(null);
+  const [msg,    setMsg]    = useState(null);
+  const [npEl,   openNp]   = useNumpad();
+
+  const group     = groups.find(g=>g.id===gid);
+  const h         = parseFloat(heads)||0;
+  const sw        = parseFloat(startW)||0;
+  const carryover = parseFloat(co)||0;
+  const totalMix  = group?group.ingredients.reduce((s,i)=>s+i.perHead*h,0):0;
+  const adjTotal  = n2(Math.max(0,totalMix-carryover));
+  const ratio     = totalMix>0?adjTotal/totalMix:0;
+
+  const loads = group?(()=>{
+    let cum=sw;
+    return group.ingredients.map(i=>{
+      const load=n2(i.perHead*h*ratio);
+      cum=n2(cum+load);
+      return {...i,load,scaleTarget:cum};
+    });
+  })():[];
+
+  if(phase==="select") return (
+    <div style={{padding:16}}>
+      {npEl}
+      {msg&&<Banner msg={msg} type="err" onClose={()=>setMsg(null)}/>}
+      <Card>
+        <STitle>Select Livestock Group</STitle>
+        {farmGroups.length===0?(
+          <>
+            <p style={{color:G.grey}}>No groups set up yet.</p>
+            <Btn onClick={()=>go("setup")} bg={G.gold} fg={G.dg}>Go to Mix Setup</Btn>
+          </>
+        ):farmGroups.map(g=>(
+          <div key={g.id} onClick={()=>setGid(g.id)}
+            style={{padding:14,borderRadius:12,marginBottom:8,cursor:"pointer",
+              border:`2px solid ${gid===g.id?G.gold:G.lgrey}`,
+              background:gid===g.id?"#fdf5e0":G.w,touchAction:"manipulation"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontWeight:"bold",color:G.dg,fontSize:15}}>{g.name}</div>
+                <div style={{fontSize:12,color:G.grey}}>{g.heads} head — {g.ingredients.length} ingredients</div>
+              </div>
+              {gid===g.id&&<span style={{fontSize:20,color:G.gold}}>v</span>}
+            </div>
+          </div>
+        ))}
+        {gid&&(
+          <Btn onClick={()=>{setHeads(group.heads||"");setMsg(null);setPhase("setup");}}
+            bg={G.gold} fg={G.dg} style={{marginTop:8}}>Next</Btn>
+        )}
+      </Card>
+    </div>
+  );
+
+  if(phase==="setup") return (
+    <div style={{padding:16}}>
+      {npEl}
+      {msg&&<Banner msg={msg} type={msg.startsWith("Warning")?"warn":"err"} onClose={()=>setMsg(null)}/>}
+      <Card>
+        <STitle>Session Setup — {group.name}</STitle>
+        <label style={{fontSize:13,color:G.grey}}>Animals Today</label>
+        <NumField value={heads} unit="head"
+          onClick={()=>openNp("Animals today","head",heads,false,n=>setHeads(n))}/>
+        <div style={{height:12}}/>
+        <label style={{fontSize:13,color:G.grey}}>Scale Start Weight (enter 0 if feeder is empty)</label>
+        <NumField value={startW} unit="kg"
+          onClick={()=>openNp("Scale start weight — 0 if feeder empty","kg",startW,true,n=>setStartW(n))}/>
+        <div style={{height:12}}/>
+        <label style={{fontSize:13,color:G.grey}}>Feed Remaining in Hopper — carryover, enter 0 if none</label>
+        <NumField value={co} unit="kg"
+          onClick={()=>openNp("Feed remaining in hopper","kg",co,true,n=>setCO(n))}/>
+        {heads&&startW!==""&&co!==""&&(
+          <div style={{marginTop:12,padding:12,background:"#e8f5e9",
+            borderRadius:10,border:"1px solid #81c784"}}>
+            <div style={{fontSize:13,color:G.dg}}>
+              <div>Full mix required: <strong>{n2(totalMix)} kg</strong></div>
+              <div>Carryover deducted: <strong>{carryover} kg</strong></div>
+              <div style={{color:G.mg,fontWeight:"bold",marginTop:4}}>
+                Net to load today: <strong>{adjTotal} kg</strong>
+              </div>
+            </div>
+          </div>
+        )}
+        <div style={{height:12}}/>
+        <Btn onClick={()=>{
+          if(!heads||h<=0)              {setMsg("Enter number of animals."); return;}
+          if(startW===""||isNaN(+startW)){setMsg("Enter start weight (0 if empty)."); return;}
+          if(co===""||isNaN(+co))       {setMsg("Enter carryover (0 if none)."); return;}
+          if(carryover>=totalMix)       {setMsg("Carryover equals or exceeds total mix — nothing to add!"); return;}
+          if(sw>0.6*(group.capacity||99999)){setMsg("Warning: start weight seems very high. Check then tap Begin again."); return;}
+          setMsg(null);setStep(0);setPhase("loading");
+        }} bg={G.gold} fg={G.dg}>Begin Loading</Btn>
+        <Btn onClick={()=>setPhase("select")} bg={G.grey}>Back</Btn>
+      </Card>
+    </div>
+  );
+
+  if(phase==="loading") {
+    const ing    = loads[step];
+    const prevTgt= step===0?sw:loads[step-1].scaleTarget;
+    const isLast = step===loads.length-1;
+    const pct    = Math.round(((step+1)/loads.length)*100);
+    return (
+      <div style={{padding:16}}>
+        {msg&&<Banner msg={msg} type="warn" onClose={()=>setMsg(null)}/>}
+        <div style={{marginBottom:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:G.grey,marginBottom:4}}>
+            <span>Step {step+1} of {loads.length}</span><span>{pct}%</span>
+          </div>
+          <div style={{background:G.lgrey,borderRadius:6,height:10}}>
+            <div style={{background:G.gold,height:10,borderRadius:6,
+              width:pct+"%",transition:"width .3s"}}/>
+          </div>
+        </div>
+        <Card>
+          <div style={{textAlign:"center",marginBottom:16}}>
+            <div style={{fontSize:12,color:G.grey,fontFamily:serif}}>Loading ingredient</div>
+            <div style={{fontFamily:serif,fontSize:26,fontWeight:"bold",color:G.dg,marginTop:2}}>
+              {ing.name}
+            </div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            <div style={{background:G.lc,borderRadius:12,padding:14,
+              textAlign:"center",border:`1px solid ${G.gold}`}}>
+              <div style={{fontSize:11,color:G.grey,marginBottom:4}}>Add this amount</div>
+              <div style={{fontSize:32,fontWeight:"bold",color:G.gold}}>{ing.load}</div>
+              <div style={{fontSize:13,color:G.grey}}>kg</div>
+            </div>
+            <div style={{background:"#e8f5e9",borderRadius:12,padding:14,
+              textAlign:"center",border:"2px solid #27ae60"}}>
+              <div style={{fontSize:11,color:G.grey,marginBottom:4}}>Stop scales at</div>
+              <div style={{fontSize:32,fontWeight:"bold",color:"#1a7a3a"}}>{ing.scaleTarget}</div>
+              <div style={{fontSize:13,color:G.grey}}>kg</div>
+            </div>
+          </div>
+          <div style={{background:G.lc,borderRadius:8,padding:10,fontSize:12,
+            color:G.grey,marginBottom:14,textAlign:"center"}}>
+            Previous reading: <strong style={{color:G.dg}}>{prevTgt} kg</strong>
+          </div>
+          {isLast?(
+            <Btn onClick={()=>{
+              const record={
+                id:uid(),date:today(),
+                farmId:settings.currentFarmId,
+                groupId:group.id,groupName:group.name,
+                heads:h,totalKg:adjTotal,carryover,startWeight:sw,
+                ingredients:Object.fromEntries(loads.map(l=>[l.name,l.load])),
+              };
+              onSave(record);setResult(record);setPhase("done");
+            }} bg={G.gold} fg={G.dg}>Complete and Save Record</Btn>
+          ):(
+            <Btn onClick={()=>setStep(s=>s+1)} bg={G.mg}>
+              Done — Next: {loads[step+1]?.name}
+            </Btn>
+          )}
+          <Btn onClick={()=>step>0?setStep(s=>s-1):setPhase("setup")} bg={G.grey} sm>Back</Btn>
+        </Card>
+        <Card>
+          <STitle>All Steps</STitle>
+          {loads.map((l,i)=>(
+            <div key={l.id} style={{display:"flex",justifyContent:"space-between",
+              padding:"6px 0",borderBottom:`1px solid ${G.lgrey}`,
+              fontSize:13,opacity:i<step?0.45:1}}>
+              <span style={{color:i===step?G.gold:G.dg,fontWeight:i===step?"bold":"normal"}}>
+                {i<step?"done ":i===step?"now: ":`${i+1}. `}{l.name}
+              </span>
+              <span style={{color:G.grey}}>{l.load} kg to {l.scaleTarget}</span>
+            </div>
+          ))}
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{padding:16}}>
+      <Card style={{textAlign:"center"}}>
+        <div style={{fontSize:48,marginBottom:8}}>✅</div>
+        <div style={{fontFamily:serif,fontSize:22,fontWeight:"bold",color:G.dg,marginBottom:4}}>
+          Feed Complete!
+        </div>
+        <div style={{color:G.grey,fontSize:13,marginBottom:16}}>{result?.date} — {group.name}</div>
+        <div style={{background:G.lc,borderRadius:10,padding:12,marginBottom:14,textAlign:"left"}}>
+          <div style={{fontSize:14,marginBottom:4}}>Animals fed: <strong>{result?.heads}</strong></div>
+          <div style={{fontSize:14,marginBottom:4}}>Net loaded: <strong>{result?.totalKg} kg</strong></div>
+          {carryover>0&&<div style={{fontSize:14}}>Carryover used: <strong>{carryover} kg</strong></div>}
+        </div>
+        <STitle>Ingredient Breakdown</STitle>
+        {loads.map(l=>(
+          <div key={l.id} style={{display:"flex",justifyContent:"space-between",
+            padding:"7px 0",borderBottom:`1px solid ${G.lgrey}`,fontSize:14}}>
+            <span>{l.name}</span>
+            <strong style={{color:G.gold}}>{l.load} kg</strong>
+          </div>
+        ))}
+        <div style={{height:16}}/>
+        <Btn onClick={()=>{
+          setPhase("select");setGid("");setHeads("");setStartW("");setCO("");
+          setStep(0);setResult(null);setMsg(null);
+        }} bg={G.gold} fg={G.dg}>Start Another Session</Btn>
+        <Btn onClick={()=>go("records")}>View Records</Btn>
+        <Btn onClick={()=>go("home")} bg={G.grey}>Home</Btn>
+      </Card>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// RECORDS
+// ════════════════════════════════════════════════════════════
+function RecordsScreen({farms,groups,records,pending,settings,isOnline,go}) {
+  const [tf,  setTF]  = useState("all");
+  const [gf,  setGF]  = useState("all");
+  const [msg, setMsg] = useState(null);
+
+  const farm       = farms.find(f=>f.id===settings.currentFarmId);
+  const farmGroups = groups.filter(g=>g.farmId===settings.currentFarmId);
+  const allRecs    = [...records,...pending].filter(r=>r.farmId===settings.currentFarmId);
+  const now        = new Date();
+
+  const displayed = allRecs
+    .filter(r=>{
+      const d=new Date(r.date);
+      if(tf==="week"){const ago=new Date(now);ago.setDate(ago.getDate()-7);return d>=ago;}
+      if(tf==="month") return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear();
+      return true;
+    })
+    .filter(r=>gf==="all"||r.groupId===gf)
+    .sort((a,b)=>b.date.localeCompare(a.date));
+
+  const dlBlob=(blob,name)=>{
+    const url=URL.createObjectURL(blob);
+    Object.assign(document.createElement("a"),{href:url,download:name}).click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportExcel=()=>{
+    if(allRecs.length===0){setMsg("No records to export."); return;}
+    const XL=window.XLSX;
+    if(!XL){setMsg("Excel library loading — please wait a moment and try again."); return;}
+    const wb=XL.utils.book_new();
+    const byGroup={};
+    allRecs.forEach(r=>{
+      if(!byGroup[r.groupId]) byGroup[r.groupId]={name:r.groupName,recs:[]};
+      byGroup[r.groupId].recs.push(r);
+    });
+    const buildSheet=recs=>{
+      const cols=[...new Set(recs.flatMap(r=>Object.keys(r.ingredients||{})))];
+      const rows=recs.map(r=>{
+        const row={Date:r.date,Group:r.groupName,Heads:r.heads};
+        cols.forEach(n=>{row[n]=r.ingredients?.[n]??0;});
+        row["Total (kg)"]=n2(Object.values(r.ingredients||{}).reduce((a,b)=>a+b,0));
+        return row;
+      });
+      return XL.utils.json_to_sheet(rows);
+    };
+    const adRecs=[];
+    Object.values(byGroup).forEach(({name,recs})=>{
+      if(isAD(name)){adRecs.push(...recs);}
+      else{XL.utils.book_append_sheet(wb,buildSheet(recs),name.slice(0,31));}
+    });
+    if(adRecs.length>0) XL.utils.book_append_sheet(wb,buildSheet(adRecs),"AD Records");
+    const fname=(farm?.name||"Farm")+"_FeedRecords_"+today()+".xlsx";
+    const out  =XL.write(wb,{bookType:"xlsx",type:"array"});
+    const blob =new Blob([out],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    const file =new File([blob],fname,{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+    if(navigator.share&&navigator.canShare?.({files:[file]})){
+      navigator.share({title:fname,files:[file]}).catch(()=>dlBlob(blob,fname));
+    }else{
+      dlBlob(blob,fname);
+      setMsg("Downloaded! Open in Excel or share via WhatsApp.");
+    }
+  };
+
+  return (
+    <div style={{padding:16}}>
+      {pending.length>0&&(
+        <Banner msg={pending.length+" record(s) pending sync — "+(isOnline?"syncing…":"will sync when back online")}
+          type="warn"/>
+      )}
+      {msg&&<Banner msg={msg} type={msg.startsWith("No")||msg.startsWith("Excel")?"warn":"ok"} onClose={()=>setMsg(null)}/>}
+      <Card>
+        <STitle>Feed Records — {farm?.name||"No farm"}</STitle>
+        <div style={{display:"flex",gap:6,marginBottom:10}}>
+          {["all","week","month"].map(f=>(
+            <button key={f} onClick={()=>setTF(f)} style={{
+              flex:1,padding:"9px 0",borderRadius:9,border:"none",
+              background:tf===f?G.dg:G.lgrey,color:tf===f?G.cream:G.dg,
+              fontWeight:"bold",fontSize:12,cursor:"pointer",
+              textTransform:"capitalize",touchAction:"manipulation"}}>{f}</button>
+          ))}
+        </div>
+        <select value={gf} onChange={e=>setGF(e.target.value)}
+          style={{width:"100%",padding:10,borderRadius:9,border:`1px solid ${G.lgrey}`,
+            fontSize:13,marginBottom:12}}>
+          <option value="all">All Groups</option>
+          {farmGroups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+        </select>
+        <Btn onClick={exportExcel} bg={G.gold} fg={G.dg}>Export Excel — Share via WhatsApp</Btn>
+        <div style={{fontSize:11,color:G.grey,textAlign:"center",marginTop:-4,marginBottom:6}}>
+          Separate sheet per group — AD groups merged — one column per ingredient
+        </div>
+      </Card>
+      <div style={{fontSize:13,color:G.grey,marginBottom:8}}>
+        {displayed.length} record{displayed.length!==1?"s":""}
+      </div>
+      {displayed.length===0&&(
+        <Card><p style={{textAlign:"center",color:G.grey}}>No records for these filters.</p></Card>
+      )}
+      {displayed.map(r=>(
+        <Card key={r.id} style={{borderLeft:`4px solid ${isAD(r.groupName)?G.gold:G.mg}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <div>
+              <div style={{fontWeight:"bold",color:G.dg,fontSize:14}}>{r.groupName}</div>
+              <div style={{fontSize:12,color:G.grey}}>{r.date} — {r.heads} head</div>
+              {r.carryover>0&&<div style={{fontSize:11,color:G.amber}}>Carryover: {r.carryover} kg</div>}
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontWeight:"bold",color:G.gold,fontSize:15}}>{r.totalKg} kg</div>
+              {pending.some(p=>p.id===r.id)&&
+                <div style={{fontSize:10,color:G.amber}}>pending sync</div>}
+            </div>
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {Object.entries(r.ingredients||{}).map(([n,kg])=>(
+              <span key={n} style={{background:G.lc,borderRadius:10,
+                padding:"3px 9px",fontSize:11,color:G.dg}}>{n}: {kg} kg</span>
+            ))}
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// SETTINGS
+// ════════════════════════════════════════════════════════════
+function SettingsScreen({farms,settings,isOnline,go,onSaveFarm,onDeleteFarm,onSaveSettings}) {
+  const [sett,  setSett]  = useState({...settings});
+  const [nfName,setNFN]   = useState("");
+  const [nfCap, setNFC]   = useState("");
+  const [editF, setEditF] = useState(null);
+  const [msg,   setMsg]   = useState(null);
+  const [npEl,  openNp]  = useNumpad();
+  const days=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+
+  const addFarm=()=>{
+    if(!nfName.trim())        {setMsg("Enter a farm name."); return;}
+    if(!nfCap||isNaN(nfCap)) {setMsg("Enter mixer capacity."); return;}
+    onSaveFarm({id:uid(),name:nfName.trim(),capacity:parseFloat(nfCap)});
+    setNFN("");setNFC("");setMsg(null);
+  };
+  const save=()=>{
+    if(sett.email&&!/\S+@\S+\.\S+/.test(sett.email)){setMsg("Enter a valid email address."); return;}
+    onSaveSettings(sett);
+    setMsg("Settings saved!");
+    setTimeout(()=>setMsg(null),2500);
+  };
+
+  return (
+    <div style={{padding:16}}>
+      {npEl}
+      {msg&&<Banner msg={msg} type={msg==="Settings saved!"?"ok":"err"} onClose={()=>setMsg(null)}/>}
+
+      <Card>
+        <STitle>Account</STitle>
+        <label style={{fontSize:13,color:G.grey}}>Email Address</label>
+        <input value={sett.email||""} onChange={e=>setSett(s=>({...s,email:e.target.value}))}
+          type="email" placeholder="your@email.com" inputMode="email"
+          style={{width:"100%",padding:12,borderRadius:10,border:`2px solid ${G.gold}`,
+            fontSize:15,marginBottom:10,boxSizing:"border-box"}}/>
+        <div style={{fontSize:11,color:G.grey,marginBottom:4}}>
+          Account ID: {sett.accountId||"—"}
+          <button onClick={()=>navigator.clipboard?.writeText(sett.accountId||"")}
+            style={{marginLeft:8,background:G.lg,color:G.w,border:"none",
+              borderRadius:5,padding:"2px 9px",fontSize:11,cursor:"pointer"}}>Copy</button>
+        </div>
+        <div style={{fontSize:11,color:G.grey}}>
+          Share this ID with other devices to link them to the same account.
+        </div>
+      </Card>
+
+      <Card>
+        <STitle>Farms</STitle>
+        {farms.map(f=>(
+          <div key={f.id} style={{display:"flex",justifyContent:"space-between",
+            alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${G.lgrey}`}}>
+            <div>
+              <span style={{fontWeight:"bold",color:G.dg,fontSize:14}}>{f.name}</span>
+              <span style={{fontSize:12,color:G.grey,marginLeft:8}}>{f.capacity} kg</span>
+              {f.id===settings.currentFarmId&&(
+                <span style={{marginLeft:6,background:G.ok,color:G.w,borderRadius:6,
+                  padding:"1px 7px",fontSize:10,fontWeight:"bold"}}>Active</span>
+              )}
+            </div>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>setEditF({...f})}
+                style={{background:G.mg,color:G.w,border:"none",borderRadius:7,
+                  padding:"5px 11px",cursor:"pointer",fontSize:12}}>Edit</button>
+              {farms.length>1&&(
+                <button onClick={()=>{if(window.confirm("Delete farm "+f.name+"?")) onDeleteFarm(f.id);}}
+                  style={{background:G.red,color:G.w,border:"none",borderRadius:7,
+                    padding:"5px 11px",cursor:"pointer",fontSize:12}}>Del</button>
+              )}
+            </div>
+          </div>
+        ))}
+        <div style={{marginTop:14}}>
+          <div style={{fontSize:13,color:G.grey,marginBottom:6,fontWeight:"bold"}}>Add New Farm</div>
+          <input value={nfName} onChange={e=>setNFN(e.target.value)} placeholder="Farm name"
+            style={{width:"100%",padding:10,borderRadius:9,border:`1px solid ${G.lgrey}`,
+              fontSize:14,marginBottom:8,boxSizing:"border-box"}}/>
+          <NumField value={nfCap} unit="kg" placeholder="Mixer capacity — tap to enter"
+            onClick={()=>openNp("Mixer capacity (kg)","kg",nfCap,true,n=>setNFC(n))}/>
+          <div style={{height:8}}/>
+          <Btn onClick={addFarm} bg={G.mg} sm>+ Add Farm</Btn>
+        </div>
+      </Card>
+
+      <Card>
+        <STitle>Active Farm</STitle>
+        <select value={sett.currentFarmId||""}
+          onChange={e=>setSett(s=>({...s,currentFarmId:e.target.value}))}
+          style={{width:"100%",padding:12,borderRadius:10,border:`2px solid ${G.gold}`,
+            fontSize:15,color:G.dg}}>
+          <option value="">Select Farm</option>
+          {farms.map(f=><option key={f.id} value={f.id}>{f.name}</option>)}
+        </select>
+      </Card>
+
+      <Card>
+        <STitle>Weekly Reminder</STitle>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <span style={{fontSize:14,color:G.dg}}>Remind me to send records</span>
+          <div onClick={()=>setSett(s=>({...s,weeklyReminder:!s.weeklyReminder}))}
+            style={{width:52,height:28,borderRadius:14,cursor:"pointer",
+              background:sett.weeklyReminder?G.mg:G.grey,position:"relative",
+              transition:"background .2s",touchAction:"manipulation"}}>
+            <div style={{width:24,height:24,borderRadius:12,background:G.w,
+              position:"absolute",top:2,
+              left:sett.weeklyReminder?26:2,
+              transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.3)"}}/>
+          </div>
+        </div>
+        {sett.weeklyReminder&&(
+          <select value={sett.reminderDay??1}
+            onChange={e=>setSett(s=>({...s,reminderDay:parseInt(e.target.value)}))}
+            style={{width:"100%",padding:10,borderRadius:9,border:`1px solid ${G.lgrey}`,fontSize:14}}>
+            {days.map((d,i)=><option key={d} value={i}>{d}</option>)}
+          </select>
+        )}
+      </Card>
+
+      <Btn onClick={save} bg={G.gold} fg={G.dg}>Save Settings</Btn>
+
+      {editF&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.55)",
+          zIndex:5000,display:"flex",alignItems:"center",padding:24}}>
+          {npEl}
+          <div style={{background:G.w,borderRadius:16,padding:20,width:"100%",
+            boxShadow:"0 8px 32px rgba(0,0,0,.25)"}}>
+            <div style={{fontFamily:serif,fontWeight:"bold",color:G.dg,marginBottom:12,fontSize:16}}>
+              Edit Farm
+            </div>
+            <input value={editF.name} onChange={e=>setEditF(f=>({...f,name:e.target.value}))}
+              style={{width:"100%",padding:11,borderRadius:9,border:`2px solid ${G.gold}`,
+                fontSize:15,boxSizing:"border-box",marginBottom:10}}/>
+            <label style={{fontSize:12,color:G.grey}}>Mixer Capacity (kg)</label>
+            <NumField value={editF.capacity} unit="kg"
+              onClick={()=>openNp("Mixer capacity","kg",editF.capacity,true,
+                n=>setEditF(f=>({...f,capacity:n})))}/>
+            <div style={{display:"flex",gap:8,marginTop:12}}>
+              <button onClick={()=>{onSaveFarm(editF);setEditF(null);}}
+                style={{flex:1,padding:13,background:G.gold,color:G.dg,border:"none",
+                  borderRadius:10,fontWeight:"bold",cursor:"pointer",fontSize:15}}>Save</button>
+              <button onClick={()=>setEditF(null)}
+                style={{flex:1,padding:13,background:G.grey,color:G.w,border:"none",
+                  borderRadius:10,cursor:"pointer",fontSize:15}}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// HELP
+// ════════════════════════════════════════════════════════════
+function HelpScreen() {
+  const iSteps=[
+    {icon:"🌐",t:"Open in Safari",       d:"On your iPhone or iPad, open this app's URL in Safari. Do NOT use Chrome — Safari is required."},
+    {icon:"⬆️",t:"Tap the Share button", d:"At the bottom of Safari, tap the Share icon — a square with an upward arrow."},
+    {icon:"➕",t:"Add to Home Screen",   d:'Scroll through the Share menu and tap "Add to Home Screen".'},
+    {icon:"✏️",t:"Name the app",          d:'Type "TMR Feeder" and tap "Add" in the top-right corner.'},
+    {icon:"📱",t:"Done!",                 d:"The icon appears on your Home Screen and opens full-screen like any other app."},
+  ];
+  const sSteps=[
+    {icon:"🔗",t:"Copy the web address",d:"In Safari, tap the address bar and copy the full URL."},
+    {icon:"💬",t:"Send via WhatsApp",   d:"Paste the link into a WhatsApp message to your farm staff."},
+    {icon:"📲",t:"Open in Safari",      d:"Staff open the link in Safari. In WhatsApp tap the three dots and choose Open in Safari."},
+    {icon:"➕",t:"Add to Home Screen",  d:"They follow the same steps above."},
+    {icon:"⚙️",t:"Match farm setup",    d:"Set the same farm in Settings on each device so all staff work from the same groups."},
+  ];
+  const tips=[
+    "Records are stored on each device. Export regularly from Feed Records.",
+    "If offline, records save locally and sync when back online.",
+    "The weekly reminder prompts you to export records on your chosen day.",
+    "Groups with AD in the name are merged into one sheet in the Excel export.",
+    "Different farms have their own livestock groups and feed rations.",
+    "No maximum weight per ingredient — only total mix is checked against mixer capacity.",
+  ];
+  const Section=({title,items})=>(
+    <Card>
+      <STitle>{title}</STitle>
+      {items.map((s,i)=>(
+        <div key={i} style={{display:"flex",gap:12,marginBottom:14,alignItems:"flex-start"}}>
+          <div style={{fontSize:26,minWidth:38,lineHeight:1}}>{s.icon}</div>
+          <div>
+            <div style={{fontWeight:"bold",color:G.dg,fontSize:14}}>Step {i+1}: {s.t}</div>
+            <div style={{color:G.grey,fontSize:13,marginTop:3,lineHeight:1.5}}>{s.d}</div>
+          </div>
+        </div>
+      ))}
+    </Card>
+  );
+  return (
+    <div style={{padding:16}}>
+      <Section title="Add to iPhone / iPad Home Screen" items={iSteps}/>
+      <Section title="Share with Other Staff" items={sSteps}/>
+      <Card>
+        <STitle>Tips and Notes</STitle>
+        {tips.map((t,i)=>(
+          <div key={i} style={{display:"flex",gap:8,marginBottom:8,fontSize:13,color:G.grey}}>
+            <span style={{color:G.gold,minWidth:16}}>-</span>
+            <span>{t}</span>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// ROOT APP
+// ════════════════════════════════════════════════════════════
+function App() {
+  const [screen,setScreen] = useState("home");
+  const [sd,    setSD]     = useState({});
+  const [farms, setFarms]  = useState(()=>lsGet("tmr_farms",  []));
+  const [groups,setGroups] = useState(()=>lsGet("tmr_groups", []));
+  const [recs,  setRecs]   = useState(()=>lsGet("tmr_records",[]));
+  const [pend,  setPend]   = useState(()=>lsGet("tmr_pending",[]));
+  const [sett,  setSett]   = useState(()=>lsGet("tmr_settings",{
+    email:"",currentFarmId:"",accountId:uid(),weeklyReminder:false,reminderDay:1,
+  }));
+  const [online,setOnline] = useState(navigator.onLine);
+
+  useEffect(()=>lsSet("tmr_farms",  farms),  [farms]);
+  useEffect(()=>lsSet("tmr_groups", groups), [groups]);
+  useEffect(()=>lsSet("tmr_records",recs),   [recs]);
+  useEffect(()=>lsSet("tmr_pending",pend),   [pend]);
+  useEffect(()=>lsSet("tmr_settings",sett),  [sett]);
+
+  useEffect(()=>{
+    const on=()=>setOnline(true), off=()=>setOnline(false);
+    window.addEventListener("online",on);
+    window.addEventListener("offline",off);
+    return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off);};
+  },[]);
+
+  useEffect(()=>{
+    if(online&&pend.length>0){setRecs(p=>[...p,...pend]);setPend([]);}
+  },[online]);
+
+  useEffect(()=>{
+    if(window.XLSX) return;
+    const s=document.createElement("script");
+    s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    s.async=true;
+    document.head.appendChild(s);
+  },[]);
+
+  useEffect(()=>{
+    if(!sett.weeklyReminder) return;
+    if(new Date().getDay()!==sett.reminderDay) return;
+    const last=lsGet("tmr_last_reminder","");
+    if(last===today()) return;
+    lsSet("tmr_last_reminder",today());
+    setTimeout(()=>alert("Weekly Reminder: Time to export and send your feed records!"),1500);
+  },[]);
+
+  const go  = (scr,data={})=>{setScreen(scr);setSD(data);};
+  const home= ()=>go("home");
+
+  const saveRecord = rec=>online?setRecs(p=>[...p,rec]):setPend(p=>[...p,rec]);
+  const saveFarm   = f=>{
+    setFarms(p=>{const i=p.findIndex(x=>x.id===f.id);return i>=0?p.map(x=>x.id===f.id?f:x):[...p,f];});
+  };
+  const deleteFarm = id=>{
+    setFarms(p=>p.filter(f=>f.id!==id));
+    setGroups(p=>p.filter(g=>g.farmId!==id));
+    if(sett.currentFarmId===id) setSett(s=>({...s,currentFarmId:""}));
+  };
+  const saveGroup  = g=>{
+    setGroups(p=>{const i=p.findIndex(x=>x.id===g.id);return i>=0?p.map(x=>x.id===g.id?g:x):[...p,g];});
+  };
+
+  const titles={
+    home:"TMR Feeder Manager",setup:"Mix Setup",groupEditor:"Group Editor",
+    process:"Feed Process",records:"Feed Records",settings:"Settings",help:"Share App",
+  };
+  const shared={farms,groups,records:recs,pending:pend,settings:sett,isOnline:online,go};
+
+  const renderScreen=()=>{
+    if(screen==="home")        return <HomeScreen {...shared} onFarmChange={id=>setSett(s=>({...s,currentFarmId:id}))}/>;
+    if(screen==="setup")       return <SetupScreen {...shared} onDeleteGroup={id=>setGroups(p=>p.filter(g=>g.id!==id))}/>;
+    if(screen==="groupEditor") return <GroupEditor group={sd.group} farmId={sett.currentFarmId} onSave={g=>{saveGroup(g);go("setup");}} go={go}/>;
+    if(screen==="process")     return <ProcessScreen {...shared} onSave={saveRecord}/>;
+    if(screen==="records")     return <RecordsScreen {...shared}/>;
+    if(screen==="settings")    return <SettingsScreen {...shared} onSaveFarm={saveFarm} onDeleteFarm={deleteFarm} onSaveSettings={s=>setSett(s)}/>;
+    if(screen==="help")        return <HelpScreen/>;
+    return <HomeScreen {...shared} onFarmChange={id=>setSett(s=>({...s,currentFarmId:id}))}/>;
+  };
+
+  return (
+    <div style={{maxWidth:480,margin:"0 auto",background:G.lc,minHeight:"100vh",fontFamily:sans}}>
+      <Header title={titles[screen]||"TMR Feeder"} onHome={home} isOnline={online} pending={pend.length}/>
+      <div style={{paddingBottom:32}}>{renderScreen()}</div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+</script>
+</body>
+</html>
