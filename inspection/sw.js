@@ -1,6 +1,6 @@
 // Offline cache for Inspection Notes. Bump the version whenever app files change.
-const CACHE = 'inspection-notes-v2';
-const FILES = ['./', 'index.html', 'app.js', 'voice.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'lib/jszip.min.js', 'lib/docx.umd.js'];
+const CACHE = 'inspection-notes-v3';
+const FILES = ['./', 'index.html', 'app.js', 'voice.js', 'gallery.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'lib/jszip.min.js', 'lib/docx.umd.js'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

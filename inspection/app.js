@@ -2,7 +2,7 @@
    Plain JavaScript, no build step. Data is kept on the device in IndexedDB. */
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const PAL = { dark: '013C29', green: '015037', light: '5A8D7C', pale: 'E1E8CE' };
 const SQFT = 10.7639;
 const ACRE = 2.47105;
@@ -368,6 +368,7 @@ async function addPhotos(files, fromCamera) {
   const pos = fromCamera ? await getPosition() : null;
   const max = S.settings.photoMax || 2400;
   let n = 0;
+  const added = [];
   for (const f of files) {
     try {
       const img = await loadImage(f);
@@ -376,19 +377,32 @@ async function addPhotos(files, fromCamera) {
       const p = {
         id: uid(), jobId: photoTarget.jobId, itemId: photoTarget.itemId || null,
         blob: main.blob, thumb: th.blob, w: main.w, h: main.h,
-        caption: '', taken: Date.now(), fileName: f.name || '', pos: pos || null,
-        order: Date.now() + n, inReport: true,
+        caption: '', taken: fromCamera ? Date.now() : (f.lastModified || Date.now()), fileName: f.name || '', pos: pos || null,
+        order: Date.now() + n, inReport: true, fromLibrary: !fromCamera,
       };
       await DB.put('photos', p);
+      added.push(p);
       n++;
     } catch (e) { console.error(e); toast('One photo could not be read'); }
   }
   if (n) {
-    toast(`${n} photo${n > 1 ? 's' : ''} saved`);
+    if (!fromCamera || S.settings.galleryPrompt === false) toast(`${n} photo${n > 1 ? 's' : ''} saved`);
     S.job.updated = Date.now(); await DB.put('jobs', S.job);
     requestPersist();
-    render();
+    await render();
+    if (fromCamera && S.settings.galleryPrompt !== false) {
+      actionToast(`${n > 1 ? n + ' photos' : 'Photo'} saved. Also save to the phone gallery?`, 'Save', () => saveToGallery(added).then(c => c && render()));
+    }
   }
+}
+
+function actionToast(msg, label, fn, ms = 7000) {
+  const t = h('div', { class: 'toast', style: { display: 'flex', gap: '12px', alignItems: 'center' } },
+    h('span', null, msg),
+    h('button', { class: 'btn sm', style: { background: 'var(--pale)', color: 'var(--dark)' }, onclick: () => { t.remove(); fn(); } }, label),
+    h('button', { class: 'btn ghost sm', style: { color: 'var(--pale)' }, onclick: () => t.remove() }, '✕'));
+  document.body.append(t);
+  setTimeout(() => t.remove(), ms);
 }
 $('#camInput').addEventListener('change', e => { const f = [...e.target.files]; e.target.value = ''; addPhotos(f, true); });
 $('#libInput').addEventListener('change', e => { const f = [...e.target.files]; e.target.value = ''; addPhotos(f, false); });
@@ -648,6 +662,7 @@ async function viewJob(app) {
     h('button', { class: 'btn block', onclick: () => exportZip(job) }, 'Export ZIP backup (notes, photos, Word schedule)'),
     h('button', { class: 'btn sec block', onclick: () => exportDocx(job, true) }, 'Word inspection schedule only'),
     h('button', { class: 'btn sec block', onclick: () => exportCSV(job) }, 'Schedule of areas (CSV for Excel)'),
+    galleryButton(photos, 'Save all photographs to phone gallery'),
     job.lastExport ? h('p', { class: 'muted' }, `Last exported ${new Date(job.lastExport).toLocaleString('en-GB')}`) : null,
     h('details', null, h('summary', null, 'Delete this inspection'),
       h('p', { class: 'muted' }, 'This removes the inspection and all its photographs from this device. It cannot be undone.'),
@@ -695,7 +710,7 @@ async function viewItem(app, it) {
   const kids = [
     h('div', { class: 'card' },
       h('h2', null, h('span', { class: 'grow' }, 'Photographs'), h('span', { class: 'pill' }, photos.length)),
-      photoGrid(photos), photoButtons(it.jobId, it.id)),
+      photoGrid(photos), photoButtons(it.jobId, it.id), h('div', { style: { marginTop: '8px' } }, galleryButton(photos))),
     h('div', { class: 'card' },
       h('h2', null, 'Dictate'),
       h('p', { class: 'muted' }, k.measures
@@ -797,10 +812,10 @@ async function viewPhoto(app, p) {
       h('label', { class: 'f', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
         h('input', { type: 'checkbox', style: { width: 'auto' }, checked: p.inReport !== false, onchange: e => { p.inReport = e.target.checked; scheduleSave(p, 'photos'); } }),
         h('span', { style: { margin: 0 } }, 'Include in Word schedule')),
-      h('p', { class: 'muted' }, `Taken ${new Date(p.taken).toLocaleString('en-GB')} · ${p.w} x ${p.h} px${pos ? ' · ' + pos : ''}`),
+      h('p', { class: 'muted' }, `Taken ${new Date(p.taken).toLocaleString('en-GB')} · ${p.w} x ${p.h} px${pos ? ' · ' + pos : ''}${p.fromLibrary ? ' · From the phone library' : p.gallery ? ' · Saved to gallery' : ' · Not yet in the gallery'}`),
       pos ? h('a', { class: 'btn sec sm', href: `https://www.google.com/maps?q=${p.pos.lat},${p.pos.lng}`, target: '_blank', rel: 'noopener' }, 'Show on map') : null,
       h('div', { class: 'btns' },
-        h('button', { class: 'btn sec sm', onclick: () => downloadBlob(p.blob, safe((p.caption || 'photo') + '.jpg')) }, 'Save copy to device'),
+        h('button', { class: 'btn sec sm', onclick: async () => { if (await saveToGallery([p])) render(); } }, p.gallery ? 'Save to gallery again' : p.fromLibrary ? 'Save another copy to gallery' : 'Save to phone gallery'),
         h('button', { class: 'btn danger sm', onclick: async () => { if (confirm('Delete this photograph?')) { await DB.del('photos', p.id); history.back(); } } }, 'Delete'))));
   setFab();
 }
@@ -819,10 +834,13 @@ async function viewSettings(app) {
             .map(([v, t]) => h('option', { value: v, selected: (s.photoMax || 2400) === v }, t)))),
       h('label', { class: 'f', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
         h('input', { type: 'checkbox', style: { width: 'auto' }, checked: !!s.gps, onchange: e => saveS('gps', e.target.checked) }),
-        h('span', { style: { margin: 0 } }, 'Record GPS position with each photograph taken'))),
+        h('span', { style: { margin: 0 } }, 'Record GPS position with each photograph taken')),
+      h('label', { class: 'f', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+        h('input', { type: 'checkbox', style: { width: 'auto' }, checked: s.galleryPrompt !== false, onchange: e => saveS('galleryPrompt', e.target.checked) }),
+        h('span', { style: { margin: 0 } }, 'After each photograph, offer to save a copy to the phone gallery'))),
     dictationSettings(saveS),
     h('div', { class: 'card' }, h('h2', null, 'About'),
-      h('p', { class: 'muted' }, `Inspection Notes version ${APP_VERSION}. Data is held in this browser on this device and is not sent anywhere. Photographs taken with the in-app camera are not saved to the phone's camera roll, so export regularly.`)));
+      h('p', { class: 'muted' }, `Inspection Notes version ${APP_VERSION}. Data is held in this browser on this device and is not sent anywhere. Photographs taken with the in-app camera only reach the phone's gallery when you save them there, so export regularly.`)));
   setFab();
 }
 
@@ -940,7 +958,7 @@ async function exportZip(job) {
     return { ...rest, file: `audio/${safe(t)} voice note ${String(memoCount[t]).padStart(2, '0')}.${audioExt(m.type)}` };
   });
   zip.file('inspection.json', JSON.stringify({ app: 'inspection-notes', version: APP_VERSION, exported: new Date().toISOString(), job, items, photos: meta, memos: memoMeta }, null, 1));
-  photos.forEach(p => zip.file(names.get(p.id), p.blob));
+  for (const p of photos) zip.file(names.get(p.id), await photoWithExif(p));
   memos.forEach((m, i) => zip.file(memoMeta[i].file, m.blob));
   zip.file(safe(`${job.ref || ''} ${job.name || 'Inspection'} areas.csv`), csvFor(job, items));
   try { zip.file(safe(`${job.ref || ''} ${job.name || 'Inspection'} inspection schedule.docx`), await buildDocx(job, items, photos, memos)); }
@@ -1187,7 +1205,7 @@ $('#menuBtn').addEventListener('click', () => go('#/settings'));
   S.settings = {
     inspector: await getSetting('inspector', ''), firm: await getSetting('firm', ''),
     photoMax: await getSetting('photoMax', 2400), gps: await getSetting('gps', true),
-    dictation: await getSetting('dictation', 'auto'),
+    dictation: await getSetting('dictation', 'auto'), galleryPrompt: await getSetting('galleryPrompt', true),
   };
   Dict.localState = await getSetting('speechLocal', null); // checked only on request in Settings
   render();
