@@ -2,7 +2,7 @@
    Plain JavaScript, no build step. Data is kept on the device in IndexedDB. */
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const PAL = { dark: '013C29', green: '015037', light: '5A8D7C', pale: 'E1E8CE' };
 const SQFT = 10.7639;
 const ACRE = 2.47105;
@@ -353,14 +353,20 @@ function loadImage(file) {
     img.src = url;
   });
 }
+const CANVAS_MAX_AREA = 16.7e6; // Safari on iPhone refuses larger canvases
 function scaleTo(img, max, q) {
   let w = img.naturalWidth, hgt = img.naturalHeight;
-  const s = Math.min(1, max / Math.max(w, hgt));
+  const s = Math.min(1, max / Math.max(w, hgt), Math.sqrt(CANVAS_MAX_AREA / (w * hgt)));
   w = Math.round(w * s); hgt = Math.round(hgt * s);
   const c = document.createElement('canvas');
   c.width = w; c.height = hgt;
   c.getContext('2d').drawImage(img, 0, 0, w, hgt);
   return new Promise(res => c.toBlob(b => res({ blob: b, w, h: hgt }), 'image/jpeg', q));
+}
+
+async function isJpeg(f) {
+  const b = new Uint8Array(await f.slice(0, 3).arrayBuffer());
+  return b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF;
 }
 
 async function addPhotos(files, fromCamera) {
@@ -372,7 +378,9 @@ async function addPhotos(files, fromCamera) {
   for (const f of files) {
     try {
       const img = await loadImage(f);
-      const main = max >= 9999 && f.type === 'image/jpeg' ? { blob: f, w: img.naturalWidth, h: img.naturalHeight } : await scaleTo(img, max, 0.85);
+      // "Original" keeps the camera's own JPEG untouched, with its EXIF. Other formats are converted at full size.
+      const keepOriginal = max >= 9999 && await isJpeg(f);
+      const main = keepOriginal ? { blob: f, w: img.naturalWidth, h: img.naturalHeight } : await scaleTo(img, max, max >= 2400 ? 0.92 : 0.85);
       const th = await scaleTo(img, 320, 0.7);
       const p = {
         id: uid(), jobId: photoTarget.jobId, itemId: photoTarget.itemId || null,
@@ -597,7 +605,7 @@ async function viewHome(app) {
   kids.push(h('div', { class: 'card' },
     h('h2', null, 'Backup and transfer'),
     h('p', { class: 'muted' }, 'Everything is held on this device only. Export each inspection as a ZIP (notes, photographs and Word schedule) as soon as you are back in signal, and save it to OneDrive, Dropbox or email it to the office.'),
-    h('button', { class: 'btn sec block', onclick: () => $('#importInput').click() }, 'Import an inspection ZIP'),
+    h('button', { class: 'btn sec block', onclick: () => $('#importInput').click() }, 'Import an inspection ZIP (select all parts)'),
     est ? h('p', { class: 'muted' }, `Storage used: ${fmt(est.usage / 1048576, 1)} MB of about ${fmt0(est.quota / 1048576)} MB available. ${persisted ? 'Storage is marked as persistent.' : 'Storage is not yet marked as persistent.'}`) : null));
   app.replaceChildren(...kids);
   setFab(h('button', { class: 'btn', onclick: newJob }, '+ New inspection'));
@@ -830,11 +838,12 @@ async function viewSettings(app) {
       h('label', { class: 'f' }, h('span', null, 'Firm name (Word footer and title)'), h('input', { value: s.firm || '', oninput: e => saveS('firm', e.target.value) })),
       h('label', { class: 'f' }, h('span', null, 'Photograph size kept'),
         h('select', { onchange: e => saveS('photoMax', +e.target.value) },
-          [[1600, 'Standard (1600 px, about 0.3 MB)'], [2400, 'High (2400 px, about 0.7 MB)'], [3200, 'Very high (3200 px, about 1.3 MB)'], [9999, 'Original file (large)']]
+          [[1600, 'Standard (1600 px, about 0.4 MB each)'], [2400, 'High (2400 px, about 1 MB each)'], [3200, 'Very high (3200 px, about 1.8 MB each)'], [9999, 'Original from the camera (3 to 8 MB each)']]
             .map(([v, t]) => h('option', { value: v, selected: (s.photoMax || 2400) === v }, t)))),
       h('label', { class: 'f', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
         h('input', { type: 'checkbox', style: { width: 'auto' }, checked: !!s.gps, onchange: e => saveS('gps', e.target.checked) }),
         h('span', { style: { margin: 0 } }, 'Record GPS position with each photograph taken')),
+      h('p', { class: 'muted' }, 'Original keeps the full file exactly as the camera produced it, with its own date and location data. It uses the most storage and makes larger exports, which are split into parts of about 300 MB. The Word schedule always uses reduced copies so it stays a manageable size. On an iPhone, the full Camera app gives the highest resolution, so for the most important shots take them there and use From library, choosing Actual Size if the picker offers a size.'),
       h('label', { class: 'f', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
         h('input', { type: 'checkbox', style: { width: 'auto' }, checked: s.galleryPrompt !== false, onchange: e => saveS('galleryPrompt', e.target.checked) }),
         h('span', { style: { margin: 0 } }, 'After each photograph, offer to save a copy to the phone gallery'))),
@@ -957,16 +966,41 @@ async function exportZip(job) {
     const { blob, ...rest } = m;
     return { ...rest, file: `audio/${safe(t)} voice note ${String(memoCount[t]).padStart(2, '0')}.${audioExt(m.type)}` };
   });
-  zip.file('inspection.json', JSON.stringify({ app: 'inspection-notes', version: APP_VERSION, exported: new Date().toISOString(), job, items, photos: meta, memos: memoMeta }, null, 1));
-  for (const p of photos) zip.file(names.get(p.id), await photoWithExif(p));
+  // Split the photographs into parts so a phone never has to hold one enormous ZIP in memory.
+  const groups = [[]];
+  let size = memos.reduce((t, m) => t + m.blob.size, 0);
+  for (const p of photos) {
+    if (size + p.blob.size > ZIP_PART_BYTES && groups[groups.length - 1].length) { groups.push([]); size = 0; }
+    groups[groups.length - 1].push(p);
+    size += p.blob.size;
+  }
+  const parts = groups.length;
+  meta.forEach(m => { m.part = groups.findIndex(g => g.some(p => p.id === m.id)) + 1; });
+  zip.file('inspection.json', JSON.stringify({ app: 'inspection-notes', version: APP_VERSION, exported: new Date().toISOString(), parts, job, items, photos: meta, memos: memoMeta }, null, 1));
   memos.forEach((m, i) => zip.file(memoMeta[i].file, m.blob));
   zip.file(safe(`${job.ref || ''} ${job.name || 'Inspection'} areas.csv`), csvFor(job, items));
   try { zip.file(safe(`${job.ref || ''} ${job.name || 'Inspection'} inspection schedule.docx`), await buildDocx(job, items, photos, memos)); }
   catch (e) { console.error(e); toast('Word schedule could not be built, ZIP made without it'); }
-  const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
-  const ok = await downloadBlob(blob, safe(`${job.ref || ''} ${job.name || 'Inspection'} ${job.inspDate || todayISO()}.zip`));
-  if (ok) { job.lastExport = Date.now(); await DB.put('jobs', job); render(); }
+  const base = safe(`${job.ref || ''} ${job.name || 'Inspection'} ${job.inspDate || todayISO()}`);
+  const makePart = async i => {
+    const z = i === 0 ? zip : new JSZip();
+    if (i > 0) z.file('part.json', JSON.stringify({ app: 'inspection-notes', jobId: job.id, part: i + 1, parts }));
+    for (const p of groups[i]) z.file(names.get(p.id), await photoWithExif(p));
+    return z.generateAsync({ type: 'blob', compression: 'STORE' });
+  };
+  const partName = i => parts > 1 ? `${base} part ${i + 1} of ${parts}.zip` : `${base}.zip`;
+  const finish = async () => { job.lastExport = Date.now(); await DB.put('jobs', job); render(); };
+  const savePart = async i => {
+    if (i > 0) toast(`Preparing part ${i + 1} of ${parts}…`, 4000);
+    const ok = await downloadBlob(await makePart(i), partName(i));
+    if (!ok) return;
+    if (i + 1 < parts) actionToast(`Part ${i + 1} of ${parts} saved.`, `Save part ${i + 2}`, () => savePart(i + 1), 120000);
+    else await finish();
+  };
+  if (parts > 1) toast(`This inspection is large, so the ZIP will be saved in ${parts} parts. Keep all of them together.`, 5000);
+  await savePart(0);
 }
+let ZIP_PART_BYTES = 300 * 1048576;
 
 async function exportDocx(job) {
   toast('Building Word schedule…', 4000);
@@ -977,13 +1011,21 @@ async function exportDocx(job) {
 
 // ─── Import ────────────────────────────────────────────────
 $('#importInput').addEventListener('change', async e => {
-  const f = e.target.files[0]; e.target.value = '';
-  if (!f) return;
+  const files = [...e.target.files]; e.target.value = '';
+  if (!files.length) return;
   try {
-    let data, zip = null;
-    if (/\.json$/i.test(f.name)) data = JSON.parse(await f.text());
-    else { zip = await JSZip.loadAsync(f); data = JSON.parse(await zip.file('inspection.json').async('string')); }
+    let data = null;
+    const zips = [];
+    for (const f of files) {
+      if (/\.json$/i.test(f.name)) { data = JSON.parse(await f.text()); continue; }
+      const z = await JSZip.loadAsync(f);
+      zips.push(z);
+      if (z.file('inspection.json')) data = JSON.parse(await z.file('inspection.json').async('string'));
+    }
+    if (!data) throw new Error('Part 1 of the export, which holds the notes, was not selected');
     if (data.app !== 'inspection-notes') throw new Error('This is not an Inspection Notes export');
+    const zip = { file: name => { for (const z of zips) { const f = z.file(name); if (f) return f; } return null; } };
+    if ((data.parts || 1) > zips.length) toast(`This export has ${data.parts} parts but ${zips.length} were selected. Photographs in the missing parts will not be imported.`, 6000);
     const existing = await DB.get('jobs', data.job.id);
     if (existing && !confirm(`"${existing.name}" is already on this device. Replace it with the imported copy?`)) return;
     if (existing) {
@@ -1004,6 +1046,7 @@ $('#importInput').addEventListener('change', async e => {
       const zf = zip && zip.file(m.file);
       if (!zf) { missing++; continue; }
       const blob = new Blob([await zf.async('arraybuffer')], { type: 'image/jpeg' });
+      if (!m.w) { const im = await loadImage(blob); m.w = im.naturalWidth; m.h = im.naturalHeight; }
       const img = await loadImage(blob);
       const th = await scaleTo(img, 320, 0.7);
       const { file, ...rest } = m;
@@ -1016,6 +1059,13 @@ $('#importInput').addEventListener('change', async e => {
 });
 
 // ─── Word schedule ─────────────────────────────────────────
+// Word only needs about 1600 px, so large photographs are reduced for the schedule.
+async function reportCopy(p) {
+  if (Math.max(p.w || 0, p.h || 0) <= 1800) return p.blob.arrayBuffer();
+  try { const img = await loadImage(p.blob); return (await scaleTo(img, 1600, 0.85)).blob.arrayBuffer(); }
+  catch (e) { return p.blob.arrayBuffer(); }
+}
+
 async function buildDocx(job, items, photos, memos = []) {
   const D = window.docx;
   const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, ImageRun, Footer, PageNumber, LevelFormat, AlignmentType, BorderStyle, VerticalAlign } = D;
@@ -1061,7 +1111,7 @@ async function buildDocx(job, items, photos, memos = []) {
       const pair = list.slice(i, i + 2);
       const cells = [];
       for (const p of pair) {
-        const buf = await p.blob.arrayBuffer();
+        const buf = await reportCopy(p);
         const ratio = p.h / p.w;
         let w = maxPx, hh = Math.round(maxPx * ratio);
         if (hh > maxPx * 1.1) { hh = Math.round(maxPx * 1.1); w = Math.round(hh / ratio); }
