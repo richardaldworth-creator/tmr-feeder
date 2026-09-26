@@ -2,7 +2,7 @@
    Plain JavaScript, no build step. Data is kept on the device in IndexedDB. */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const PAL = { dark: '013C29', green: '015037', light: '5A8D7C', pale: 'E1E8CE' };
 const SQFT = 10.7639;
 const ACRE = 2.47105;
@@ -58,16 +58,23 @@ const DB = {
   db: null,
   open() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open('inspection-notes', 1);
-      r.onupgradeneeded = () => {
+      const r = indexedDB.open('inspection-notes', 2);
+      r.onupgradeneeded = e => {
         const db = r.result;
-        db.createObjectStore('jobs', { keyPath: 'id' });
-        const it = db.createObjectStore('items', { keyPath: 'id' });
-        it.createIndex('jobId', 'jobId');
-        const ph = db.createObjectStore('photos', { keyPath: 'id' });
-        ph.createIndex('jobId', 'jobId');
-        ph.createIndex('itemId', 'itemId');
-        db.createObjectStore('settings', { keyPath: 'key' });
+        if (e.oldVersion < 1) {
+          db.createObjectStore('jobs', { keyPath: 'id' });
+          const it = db.createObjectStore('items', { keyPath: 'id' });
+          it.createIndex('jobId', 'jobId');
+          const ph = db.createObjectStore('photos', { keyPath: 'id' });
+          ph.createIndex('jobId', 'jobId');
+          ph.createIndex('itemId', 'itemId');
+          db.createObjectStore('settings', { keyPath: 'key' });
+        }
+        if (e.oldVersion < 2) {
+          const vm = db.createObjectStore('memos', { keyPath: 'id' });
+          vm.createIndex('jobId', 'jobId');
+          vm.createIndex('itemId', 'itemId');
+        }
       };
       r.onsuccess = () => { this.db = r.result; res(); };
       r.onerror = () => rej(r.error);
@@ -246,7 +253,7 @@ function field(obj, def, store, onChange) {
   const save = v => { obj[key] = v; scheduleSave(obj, store); onChange && onChange(key, v); };
   let input;
   if (type === 'area') {
-    input = h('textarea', { value: obj[key] || '', oninput: e => save(e.target.value), placeholder: 'Type or use the keyboard microphone to dictate' });
+    input = h('textarea', { value: obj[key] || '', oninput: e => save(e.target.value), placeholder: Dict.mode() === 'app' ? 'Type, or tap the microphone and speak' : 'Type, or use the microphone key on the keyboard' });
   } else if (type === 'condition') {
     input = h('select', { onchange: e => save(e.target.value) },
       CONDITION.map(c => h('option', { value: c, selected: (obj[key] || '') === c }, c || '–')));
@@ -260,7 +267,9 @@ function field(obj, def, store, onChange) {
     const t = { num: 'text', short: 'text', text: 'text', date: 'date', time: 'time' }[type] || 'text';
     input = h('input', { type: t, value: obj[key] || '', inputmode: type === 'num' ? 'decimal' : null, oninput: e => save(e.target.value) });
   }
-  return h('label', { class: 'f' }, h('span', null, label), input);
+  input.dataset.key = key;
+  const speakable = !['condition', 'date', 'time'].includes(type) && Dict.mode() === 'app';
+  return h('label', { class: 'f' }, h('span', null, label), speakable ? h('div', { class: 'fld' }, input, micButton(input, type === 'num')) : input);
 }
 
 function fieldGrid(obj, defs, store, onChange) {
@@ -627,6 +636,8 @@ async function viewJob(app) {
       h('button', { class: 'btn sec sm', style: { marginTop: '8px' }, onclick: () => addItem(kind) }, `+ Add ${k.label.toLowerCase()}`)));
   }
 
+  const jobMemos = (await DB.by('memos', 'jobId', job.id)).filter(m => !m.itemId).sort((a, b) => a.created - b.created);
+  kids.push(voiceCard(job.id, null, jobMemos, 'General voice notes'));
   kids.push(h('div', { class: 'card' },
     h('h2', null, h('span', { class: 'grow' }, 'Unsorted photographs'), h('span', { class: 'pill' }, unsorted.length)),
     h('p', { class: 'muted' }, 'Use Quick photo to capture now and file it against a building or room later.'),
@@ -661,6 +672,7 @@ async function viewItem(app, it) {
   const back = parent ? `#/item/${parent.id}` : `#/job/${it.jobId}`;
   setHeader(itemTitle(it), back);
   const photos = (await DB.by('photos', 'itemId', it.id)).sort((a, b) => a.order - b.order);
+  const memos = (await DB.by('memos', 'itemId', it.id)).sort((a, b) => a.created - b.created);
   const rooms = it.kind === 'dwelling' ? S.items.filter(i => i.parentId === it.id).sort(sortItems) : [];
   const preview = h('div', { class: 'preview' });
   const refresh = () => { preview.textContent = describe(it, rooms) || 'Nothing recorded yet.'; $('#title').textContent = itemTitle(it); };
@@ -670,16 +682,34 @@ async function viewItem(app, it) {
   const idx = S.items.findIndex(i => i.id === it.id);
   if (idx >= 0) S.items[idx] = it;
 
+  const form = fieldGrid(it, k.fields, 'items', refresh);
+  const pickHost = h('div');
+  const dictBtn = h('button', { class: 'btn block' }, '🎙 Dictate notes');
+  dictBtn.addEventListener('click', () => {
+    const ta = app.querySelector('textarea[data-key="notes"]');
+    if (!ta) return;
+    ta.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const mic = ta.parentElement.querySelector('.mic');
+    if (mic) mic.click(); else { ta.focus(); toast('Tap the microphone on the keyboard to dictate', 3500); }
+  });
   const kids = [
     h('div', { class: 'card' },
       h('h2', null, h('span', { class: 'grow' }, 'Photographs'), h('span', { class: 'pill' }, photos.length)),
       photoGrid(photos), photoButtons(it.jobId, it.id)),
-    h('div', { class: 'card' }, h('h2', null, k.label + (parent ? ` in ${itemTitle(parent)}` : '')), fieldGrid(it, k.fields, 'items', refresh)),
+    h('div', { class: 'card' },
+      h('h2', null, 'Dictate'),
+      h('p', { class: 'muted' }, k.measures
+        ? 'Tap and describe what you see, for example "steel portal frame, fibre cement roof, 24.4 by 18.3, eaves 6.1, full stop". Tap again to stop. Measurements you say are offered for the measurements table. Every field also has its own microphone.'
+        : 'Tap and describe what you see. Say "full stop", "comma" or "new paragraph" for punctuation. Tap again to stop. Every field also has its own microphone.'),
+      dictBtn, pickHost),
+    h('div', { class: 'card' }, h('h2', null, k.label + (parent ? ` in ${itemTitle(parent)}` : '')), form),
   ];
   if (k.measures) {
     kids.push(h('div', { class: 'card' }, h('h2', null, it.kind === 'dwelling' ? 'Overall measurements (GIA)' : 'Measurements'),
-      (() => { const b = measureBlock(it); b.addEventListener('input', () => setTimeout(refresh, 0)); return b; })()));
+      (() => { const b = measureBlock(it); b.addEventListener('input', () => setTimeout(refresh, 0)); return b; })(),
+      h('button', { class: 'btn sec sm', style: { marginTop: '8px' }, onclick: () => { if (!offerPickUp(it, pickHost)) toast('No new measurements found in the notes'); else pickHost.scrollIntoView({ block: 'center', behavior: 'smooth' }); } }, 'Pick up measurements from notes')));
   }
+  kids.push(voiceCard(it.jobId, it.id, memos, itemTitle(it)));
   if (it.kind === 'dwelling') {
     const roomTotal = rooms.reduce((t, r) => t + measureArea(r.measures), 0);
     kids.push(h('div', { class: 'card' },
@@ -701,6 +731,10 @@ async function viewItem(app, it) {
         h('button', { class: 'btn sec sm', onclick: () => moveItem(it, 1) }, 'Move down'),
         h('button', { class: 'btn danger sm', onclick: () => deleteItem(it) }, `Delete ${k.label.toLowerCase()}`)))));
   app.replaceChildren(...kids);
+  app.addEventListener('dictated', function onD(e) {
+    if (!document.body.contains(pickHost)) return app.removeEventListener('dictated', onD);
+    if (k.measures && ['notes', 'defects', 'features'].includes(e.detail.key)) offerPickUp(it, pickHost);
+  });
   setFab(h('button', { class: 'btn', onclick: () => { photoTarget = { jobId: it.jobId, itemId: it.id }; $('#camInput').click(); } }, '📷 Photo'));
 }
 
@@ -719,6 +753,7 @@ async function deleteItem(it) {
   if (!confirm(`Delete ${itemTitle(it)}${children.length ? ` and its ${children.length} room(s)` : ''} with all photographs?`)) return;
   for (const x of [it, ...children]) {
     for (const p of await DB.by('photos', 'itemId', x.id)) await DB.del('photos', p.id);
+    for (const m of await DB.by('memos', 'itemId', x.id)) await DB.del('memos', m.id);
     await DB.del('items', x.id);
   }
   await reloadItems();
@@ -728,6 +763,7 @@ async function deleteItem(it) {
 async function deleteJob(job) {
   if (!confirm(`Delete "${job.name || 'this inspection'}" and all its photographs from this device?`)) return;
   for (const p of await DB.by('photos', 'jobId', job.id)) await DB.del('photos', p.id);
+  for (const m of await DB.by('memos', 'jobId', job.id)) await DB.del('memos', m.id);
   for (const i of await DB.by('items', 'jobId', job.id)) await DB.del('items', i.id);
   await DB.del('jobs', job.id);
   S.job = null;
@@ -784,9 +820,42 @@ async function viewSettings(app) {
       h('label', { class: 'f', style: { display: 'flex', gap: '8px', alignItems: 'center' } },
         h('input', { type: 'checkbox', style: { width: 'auto' }, checked: !!s.gps, onchange: e => saveS('gps', e.target.checked) }),
         h('span', { style: { margin: 0 } }, 'Record GPS position with each photograph taken'))),
+    dictationSettings(saveS),
     h('div', { class: 'card' }, h('h2', null, 'About'),
       h('p', { class: 'muted' }, `Inspection Notes version ${APP_VERSION}. Data is held in this browser on this device and is not sent anywhere. Photographs taken with the in-app camera are not saved to the phone's camera roll, so export regularly.`)));
   setFab();
+}
+
+function dictationSettings(saveS) {
+  const s = S.settings;
+  const status = h('p', { class: 'muted' });
+  const extra = h('div');
+  const paint = () => {
+    extra.replaceChildren();
+    if (!SpeechRec) {
+      status.textContent = 'This browser has no built-in speech recognition, so dictation uses the microphone key on the phone keyboard. On an iPhone with UK English downloaded, keyboard dictation works with no signal.';
+      return;
+    }
+    const local = Dict.localState;
+    if (local === 'available') status.textContent = 'The in-app microphone is available and the UK English speech pack is on this phone, so dictation works with no signal.';
+    else if (local === 'downloadable' || local === 'downloading') {
+      status.textContent = local === 'downloading' ? 'The offline UK English speech pack is downloading.' : 'The in-app microphone is available but needs a signal. Download the offline UK English speech pack while you have wifi so it works on farms with no coverage.';
+      if (local === 'downloadable') extra.append(h('button', { class: 'btn sec block', onclick: async () => { toast('Downloading speech pack…', 4000); const ok = await Dict.installLocal(); await Dict.checkLocal(); await setSetting('speechLocal', Dict.localState); toast(ok ? 'Offline speech pack installed' : 'The speech pack could not be installed'); paint(); } }, 'Download offline speech pack'));
+    } else {
+      status.textContent = IS_IOS
+      ? 'The in-app microphone may work but needs a signal, and it is unreliable in home screen apps on iPhone. If it fails, choose keyboard dictation below, which runs on the phone and works offline.'
+      : 'The in-app microphone is available but needs a signal on this phone. With no signal, use the keyboard microphone or record a voice note.';
+      if (typeof SpeechRec.available === 'function') extra.append(h('button', { class: 'btn sec block', onclick: async () => { toast('Checking…'); await Dict.checkLocal(); await setSetting('speechLocal', Dict.localState); paint(); if (Dict.localState === 'unavailable') toast('Offline speech is not offered on this phone'); } }, 'Check for offline speech pack'));
+    }
+  };
+  paint();
+  return h('div', { class: 'card' }, h('h2', null, 'Dictation'),
+    h('label', { class: 'f' }, h('span', null, 'Dictation method'),
+      h('select', { onchange: e => saveS('dictation', e.target.value) },
+        [['auto', 'Microphone button beside each field'], ['keyboard', 'Keyboard microphone only']]
+          .map(([v, t]) => h('option', { value: v, selected: (s.dictation || 'auto') === v }, t)))),
+    status, extra,
+    h('p', { class: 'muted' }, 'Spoken commands: "full stop", "comma", "question mark", "colon", "new line" and "new paragraph". Numbers such as "six point one" become 6.1, and "24 by 18" becomes 24 x 18.'));
 }
 
 function isStandalone() { return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone; }
@@ -808,7 +877,8 @@ async function collect(job) {
   await flushSaves();
   const items = await DB.by('items', 'jobId', job.id);
   const photos = (await DB.by('photos', 'jobId', job.id)).sort((a, b) => a.order - b.order);
-  return { items, photos };
+  const memos = (await DB.by('memos', 'jobId', job.id)).sort((a, b) => a.created - b.created);
+  return { items, photos, memos };
 }
 
 function orderedItems(items) {
@@ -857,14 +927,23 @@ async function exportCSV(job) {
 
 async function exportZip(job) {
   toast('Preparing ZIP…', 4000);
-  const { items, photos } = await collect(job);
+  const { items, photos, memos } = await collect(job);
   const zip = new JSZip();
   const names = photoFileNames(items, photos);
   const meta = photos.map(p => { const { blob, thumb, ...m } = p; return { ...m, file: names.get(p.id) }; });
-  zip.file('inspection.json', JSON.stringify({ app: 'inspection-notes', version: APP_VERSION, exported: new Date().toISOString(), job, items, photos: meta }, null, 1));
+  const memoCount = {};
+  const memoMeta = memos.map(m => {
+    const it = items.find(i => i.id === m.itemId);
+    const t = it ? itemTitle(it) : 'General';
+    memoCount[t] = (memoCount[t] || 0) + 1;
+    const { blob, ...rest } = m;
+    return { ...rest, file: `audio/${safe(t)} voice note ${String(memoCount[t]).padStart(2, '0')}.${audioExt(m.type)}` };
+  });
+  zip.file('inspection.json', JSON.stringify({ app: 'inspection-notes', version: APP_VERSION, exported: new Date().toISOString(), job, items, photos: meta, memos: memoMeta }, null, 1));
   photos.forEach(p => zip.file(names.get(p.id), p.blob));
+  memos.forEach((m, i) => zip.file(memoMeta[i].file, m.blob));
   zip.file(safe(`${job.ref || ''} ${job.name || 'Inspection'} areas.csv`), csvFor(job, items));
-  try { zip.file(safe(`${job.ref || ''} ${job.name || 'Inspection'} inspection schedule.docx`), await buildDocx(job, items, photos)); }
+  try { zip.file(safe(`${job.ref || ''} ${job.name || 'Inspection'} inspection schedule.docx`), await buildDocx(job, items, photos, memos)); }
   catch (e) { console.error(e); toast('Word schedule could not be built, ZIP made without it'); }
   const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
   const ok = await downloadBlob(blob, safe(`${job.ref || ''} ${job.name || 'Inspection'} ${job.inspDate || todayISO()}.zip`));
@@ -873,8 +952,8 @@ async function exportZip(job) {
 
 async function exportDocx(job) {
   toast('Building Word schedule…', 4000);
-  const { items, photos } = await collect(job);
-  const blob = await buildDocx(job, items, photos);
+  const { items, photos, memos } = await collect(job);
+  const blob = await buildDocx(job, items, photos, memos);
   await downloadBlob(blob, safe(`${job.ref || ''} ${job.name || 'Inspection'} inspection schedule.docx`));
 }
 
@@ -891,7 +970,14 @@ $('#importInput').addEventListener('change', async e => {
     if (existing && !confirm(`"${existing.name}" is already on this device. Replace it with the imported copy?`)) return;
     if (existing) {
       for (const p of await DB.by('photos', 'jobId', existing.id)) await DB.del('photos', p.id);
+      for (const m of await DB.by('memos', 'jobId', existing.id)) await DB.del('memos', m.id);
       for (const i of await DB.by('items', 'jobId', existing.id)) await DB.del('items', i.id);
+    }
+    for (const m of data.memos || []) {
+      const zf = zip && zip.file(m.file);
+      if (!zf) continue;
+      const { file, ...rest } = m;
+      await DB.put('memos', { ...rest, blob: new Blob([await zf.async('arraybuffer')], { type: m.type }) });
     }
     await DB.put('jobs', data.job);
     for (const i of data.items) await DB.put('items', i);
@@ -912,7 +998,7 @@ $('#importInput').addEventListener('change', async e => {
 });
 
 // ─── Word schedule ─────────────────────────────────────────
-async function buildDocx(job, items, photos) {
+async function buildDocx(job, items, photos, memos = []) {
   const D = window.docx;
   const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, ShadingType, ImageRun, Footer, PageNumber, LevelFormat, AlignmentType, BorderStyle, VerticalAlign } = D;
   const J = AlignmentType.JUSTIFIED;
@@ -977,6 +1063,8 @@ async function buildDocx(job, items, photos) {
   };
 
   const photosFor = id => photos.filter(p => p.itemId === id);
+  const memoParas = id => memos.filter(m => (m.itemId || null) === id && (m.transcript || '').trim())
+    .map(m => body([new TextRun({ text: 'Voice note. ', bold: true }), new TextRun(sentence(m.transcript))]));
   const measTable = it => {
     const ms = (it.measures || []).filter(r => rowArea(r));
     if (!ms.length) return [];
@@ -1003,6 +1091,7 @@ async function buildDocx(job, items, photos) {
   for (const [k, label] of [['extent', 'Extent of inspection'], ['limitations', 'Limitations and areas not inspected'], ['tenure', 'Tenure and occupation as seen or stated'], ['esg', 'ESG, environmental and sustainability observations'], ['notes', 'General notes']]) {
     if (job[k]) children.push(clause([new TextRun({ text: label + '. ', bold: true }), new TextRun(sentence(job[k]))]));
   }
+  children.push(...memoParas(null));
 
   // Sections per kind
   for (const kind of KIND_ORDER) {
@@ -1025,6 +1114,7 @@ async function buildDocx(job, items, photos) {
       const rooms = kind === 'dwelling' ? items.filter(r => r.parentId === it.id).sort(sortItems) : [];
       children.push(clause([new TextRun({ text: itemTitle(it) + '. ', bold: true }), new TextRun(describe(it, rooms))], { keepNext: false }));
       children.push(...measTable(it));
+      children.push(...memoParas(it.id));
       children.push(...await photoTable(photosFor(it.id)));
       if (rooms.length) {
         const rrows = rooms.map(r => { const a = measureArea(r.measures); const ms = (r.measures || []).filter(m => !m.direct && num(m.l) && num(m.w)); return [r.floor || '', r.name || '', ms.length === 1 ? `${fmt(num(ms[0].l), 2)} x ${fmt(num(ms[0].w), 2)}` : '', a ? fmt(a) : '', a ? fmt0(a * SQFT) : '']; });
@@ -1033,6 +1123,7 @@ async function buildDocx(job, items, photos) {
         for (const r of rooms) {
           const d = describe(r);
           if (d) children.push(body([new TextRun({ text: `${r.name || 'Room'}${r.floor ? ` (${lc(r.floor)})` : ''}. `, bold: true }), new TextRun(d)]));
+          children.push(...memoParas(r.id));
           children.push(...await photoTable(photosFor(r.id)));
         }
       }
@@ -1096,7 +1187,9 @@ $('#menuBtn').addEventListener('click', () => go('#/settings'));
   S.settings = {
     inspector: await getSetting('inspector', ''), firm: await getSetting('firm', ''),
     photoMax: await getSetting('photoMax', 2400), gps: await getSetting('gps', true),
+    dictation: await getSetting('dictation', 'auto'),
   };
+  Dict.localState = await getSetting('speechLocal', null); // checked only on request in Settings
   render();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(e => console.warn('Offline cache not available', e));
